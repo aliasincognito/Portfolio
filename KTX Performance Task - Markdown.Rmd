@@ -1,0 +1,624 @@
+---
+title: "KTX Performace Task"
+author: "Noah Lombardozzi"
+date: "2022-12-06"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+The following is an outline of my process for cleaning the data included in the performance task, and my exploratory analysis. My in-depth analysis is contained in the executive presentation included in my submission. No significant conclusions are drawn in this markdown file. 
+
+The initial import statement generates several errors. Those errors are handled by the cleaning process.
+
+#Loading the Data
+```{r options(warn=-1)}
+
+enrollment <- read_excel("C:\\Users\\lomba\\OneDrive\\Documents\\KTX_analytics_team_performance_task.xlsx", 
+     sheet = "18_19_enrollment", col_types = c("text", 
+         "text", "numeric"))
+special_programs <- read_excel("C:\\Users\\lomba\\OneDrive\\Documents\\KTX_analytics_team_performance_task.xlsx")
+map_performance <- read_excel("C:\\Users\\lomba\\OneDrive\\Documents\\KTX_analytics_team_performance_task.xlsx", 
+     sheet = "19_map_performance", col_types = c("text", 
+         "numeric", "text", "text", "numeric", 
+         "numeric", "numeric", "numeric"))
+```
+#Initial Examination and Data Cleaning
+I perform an initial assessment of the data:
+```{r options(warn=0)}
+
+print(enrollment %>% count(school_name))
+print(enrollment %>% count(grade_level_2019))
+
+print(special_programs %>% count(program_name))
+
+print(map_performance %>% count(map_term))
+print(map_performance %>% count(subject))
+print(map_performance %>% count(rit_score))
+print(map_performance %>% count(percentile))
+print(map_performance %>% count(quartile))
+print(map_performance %>% count(typical_fall_to_spring_growth))
+print(map_performance %>% count(year))
+```
+
+Because it appears student IDs are supposed to be only five characters long, I check the length of each student ID in each table. I'll likely use 'student_id' as a primary key if I restructure any tables, so I perform this check at the outset.
+
+```{r}
+dataframes <- list(enrollment, special_programs, map_performance)
+for (i in dataframes){
+  id_length <- nchar(i$student_id, type = "chars", allowNA = TRUE, keepNA = NA)
+  print(unique(id_length))}
+```
+
+
+The data presents other problems. First, some observations have "Read" as their subject record. Ostensibly, that's just a clerical error, and "Read" is the same is "Reading." I substitute "Read" for "Reading."
+
+
+```{r}
+map_performance$subject[map_performance$subject == "Read"] <- "Reading"
+print(map_performance %>% count(subject))
+```
+
+
+The data is also missing ~1000 'rit_score' entries. It is also missing the same number of percentile and quartile records. That many missing records warrants further investigation. I isolate the problem rows and generate summary information:
+
+```{r}
+map_performance <- map_performance %>% replace(is.na(.), 0)
+
+missing_map_performance <- subset(map_performance, map_performance$rit_score==0 & map_performance$percentile==0 & quartile==0)
+
+print(missing_map_performance %>% count(map_term))
+print(missing_map_performance %>% count(subject))
+
+summary(missing_map_performance)
+
+```
+This initial look tells us the missing records are divvied up fairly evenly between subjects and semesters, but conveys very little else. To get a better understanding of the problem, I need to see more information about the students whose records are missing. To do that, I need to join data from all three tables. That will be easier once I have a primary key for all three tables. So, I restructure the MAP Performance table so that students' reading and writing scores for both semesters are all part of a single observation. That change will cause each student's ID number to appear only once, creating a convenient primary key. It will also allow me to quickly compute how an individual student's scores changed from Fall to Spring.
+
+I start by slicing the MAP Performance table into four parts - a reading slice and a writing slice for each semester. Because the year remains constant, and the restructured columns will capture the subject and semester information for each score, I drop the year, term, and subject columns from each slice:
+
+```{r}
+fallreading <- subset(map_performance, map_performance$map_term=="Fall" & map_performance$subject=="Reading")
+fallreading <- select(fallreading, -c('year', 'map_term', 'subject'))
+springreading <- subset(map_performance, map_performance$map_term=="Spring" & map_performance$subject=="Reading")
+springreading <- select(springreading, -c('year', 'map_term', 'subject'))
+fallmath <- subset(map_performance, map_performance$map_term=="Fall" & map_performance$subject=="Math")
+fallmath <- select(fallmath, -c('year', 'map_term', 'subject'))
+springmath <- subset(map_performance, map_performance$map_term=="Spring" & map_performance$subject=="Math")
+springmath <- select(springmath, -c('year', 'map_term', 'subject'))
+```
+
+Next, I rename the columns in the slices to reflect the semester and subject being scored:
+
+```{r}
+fallreading <- rename(fallreading, 
+       fall_reading_rit_score = rit_score,	
+       fall_reading_percentile = percentile,	
+       fall_reading_quartile = quartile,	
+       reading_typical_growth = typical_fall_to_spring_growth
+)
+springreading <- rename(springreading, 
+       spring_reading_rit_score = rit_score,	
+       spring_reading_percentile = percentile,	
+       spring_reading_quartile = quartile,	
+       DELETE_spring_reading_typical_growth = typical_fall_to_spring_growth
+)
+fallmath <- rename(fallmath, 
+       fall_math_rit_score = rit_score,	
+       fall_math_percentile = percentile,	
+       fall_math_quartile = quartile,	
+       math_typical_growth = typical_fall_to_spring_growth
+)
+springmath <- rename(springmath, 
+       spring_math_rit_score = rit_score,	
+       spring_math_percentile = percentile,	
+       spring_math_quartile = quartile,	
+       DELETE_spring_math_typical_growth = typical_fall_to_spring_growth
+)
+```
+
+I merge the slices back into the MAP Performance table:
+
+```{r}
+map_performance <- merge(x=fallreading, y=springreading, by="student_id")
+map_performance <- merge(x=fallreading, y=springreading, by="student_id")
+map_performance <- merge(x=map_performance, y=fallmath, by="student_id")
+map_performance <- merge(x=map_performance, y=springmath, by="student_id")
+summary(map_performance)
+```
+
+Because the year column only contained one value ("2019"), I leave it out from the MAP Performance Table from this point on. I also drop the columns labeled "DELETE" as they're empty:
+
+```{r}
+map_performance <- select(map_performance, -c("DELETE_spring_reading_typical_growth", "DELETE_spring_math_typical_growth"))
+```
+
+Now, let's add some computed columns that record a) how well each student improved versus typical improvement b) students performance across subjects on both assessments:
+
+```{r}
+map_performance <- mutate(map_performance, total_fall_score = fall_math_rit_score + fall_reading_rit_score)
+map_performance <- mutate(map_performance, total_spring_score = spring_math_rit_score + spring_reading_rit_score)
+map_performance <- mutate(map_performance, total_score = total_fall_score + total_spring_score)
+
+map_performance <- mutate(map_performance, average_percentile = (fall_reading_percentile + fall_math_percentile + spring_reading_percentile + spring_math_percentile)/4)
+map_performance <- mutate(map_performance, reading_percentile_change = spring_reading_percentile - fall_reading_percentile)
+map_performance <- mutate(map_performance, math_percentile_change = spring_math_percentile - fall_math_percentile)
+
+map_performance <- mutate(map_performance, reading_goal_growth = spring_reading_rit_score - fall_reading_rit_score)
+map_performance <- mutate(map_performance, math_goal_growth = spring_math_rit_score - fall_math_rit_score)
+
+map_performance <- mutate(map_performance, actual_reading_growth = reading_goal_growth - reading_typical_growth)
+map_performance <- mutate(map_performance, actual_math_growth = math_goal_growth - math_typical_growth)
+map_performance <- mutate(map_performance, total_actual_growth = actual_math_growth + actual_reading_growth)
+
+map_performance <- mutate(map_performance, met_reading_goal = ifelse(reading_goal_growth >= reading_typical_growth, 1, 0))
+map_performance <- mutate(map_performance, met_math_goal = ifelse(math_goal_growth >= math_typical_growth, 1, 0))
+
+map_performance <- mutate(map_performance, goals_met = case_when(met_reading_goal == 1 & met_math_goal == 1 ~ "Both",
+                                                                met_reading_goal == 1 & met_math_goal == 0 ~"Reading Only",
+                                                                met_reading_goal == 0 & met_math_goal == 1 ~"Math Only",
+                                                                met_reading_goal== 0 & met_math_goal == 0 ~ "Neither"))
+
+```
+
+Now, I join the students' grade, special program, and specific school information onto the MAP Performance table. This will allow me to assess how best to address missing values. It will also save me time when we bring Machine Learning tools to bear later in the process. 
+
+```{r}
+master_table <- merge(x=map_performance, y=enrollment, by='student_id')
+master_table <- merge(x=master_table, y=special_programs, by='student_id')
+summary(master_table)
+```
+Now that I have a Master table, I reexamine the students whose records we're missing:
+
+```{r}
+missing_master_table <- subset(master_table, 
+                               master_table$fall_reading_rit_score==0| 
+                               master_table$fall_reading_percentile==0| 
+                               master_table$fall_reading_quartile==0|
+                               
+                               master_table$spring_reading_rit_score==0| 
+                               master_table$spring_reading_percentile==0| 
+                               master_table$spring_reading_quartile==0|
+                               
+                               master_table$fall_math_rit_score==0| 
+                               master_table$fall_math_percentile==0| 
+                               master_table$fall_math_quartile==0|
+                               
+                               master_table$spring_math_rit_score==0| 
+                               master_table$spring_math_percentile==0| 
+                               master_table$spring_math_quartile==0)
+
+print(missing_master_table %>% count(school_name))
+print(missing_master_table %>% count(grade_level_2019))
+print(missing_master_table %>% count(program_name))
+
+summary(missing_master_table)
+```
+
+While some schools (e.g., School D), some special programs (e.g., Gifted), and some grades (e.g., 6) present more missing scores than others, the missing records are distributed across all schools, special programs, and grades. That distribution suggests that the missing records are not the result of a failure in one school's, program's, or grade's record keeping. 
+
+I assume that students who don't have a recorded score did not participate in the assessment test. As such, I'm removing them from the Master table. The focus of this analysis is students' growth, and I need the data from the test to assess that growth.
+
+```{r}
+master_table <- subset(master_table, 
+                               master_table$fall_reading_rit_score!=0 & 
+                               master_table$fall_reading_percentile!=0 & 
+                               master_table$fall_reading_quartile!=0 &
+                               
+                               master_table$spring_reading_rit_score!=0 & 
+                               master_table$spring_reading_percentile!=0 & 
+                               master_table$spring_reading_quartile!=0 &
+                               
+                               master_table$fall_math_rit_score!=0 & 
+                               master_table$fall_math_percentile!=0 & 
+                               master_table$fall_math_quartile!=0 &
+                               
+                               master_table$spring_math_rit_score!=0 & 
+                               master_table$spring_math_percentile!=0 & 
+                               master_table$spring_math_quartile!=0)
+```
+
+We'll check the rest of Master table for missing data 
+
+```{r}
+print("Count of total missing values - ")
+print(sum(is.na(master_table)))
+print(colSums(is.na(master_table)))
+```
+Once we remove students who (presumably) did not participate in the assessment, the data set is almost complete. One final change: the 'program_name' column uses a period mark (".") for students who did not participate in special programs that year. I substitute the character string "None" in the period mark's place for ease of viewing.
+
+Additionally, a couple of students have "NULL" listed in their 'program_name entry'. Because there's a significant chance "NULL" represents a failed entry of participation in a special program, I assume its a failed entry and drop it from the data set:
+
+```{r}
+master_table$program_name[master_table$program_name == "."] <- "None"
+master_table <- subset(master_table, master_table$program_name!= "NULL")
+print(master_table %>% count(program_name))
+```
+
+The data is now cleaned, and ready for exploratory analysis.
+
+#Exploratory Data Analysis
+
+For this portion of the process, I visualize and restructure the data in different ways to tease out potential connections between the data. A note of warning: Most of the visualization sections are intended for a person who has already familiarized themselves with the data and is looking to spot as-yet unidentified connections. These visualizations are information dense, and generally do not comport with accepted aesthetic principles.
+
+First, I create a histogram to get a sense of the distribution of students across schools, grades, and those students' performance:
+
+```{r fig.align="center", echo = FALSE,fig.width = 12}
+ggplot(master_table, aes(x = grade_level_2019, fill = goals_met)) +
+  geom_histogram(position = "identity") +
+  facet_grid(school_name ~ .) + scale_fill_manual(values=c("green", "yellow", "red", "blue"))
+```
+##School EDA
+
+Next, I focus in on the different schools. I create charts to represent the number of students in each school and which grades attend which schools. I also create charts to visualize each school's students' growth from Fall to Spring and their performance against other students nationally: 
+
+```{r}
+#Student Count by School
+ggplot(master_table, aes(x=school_name)) +
+  geom_histogram(position = "identity", stat="count")
+```
+
+```{r}
+#Reading Growth by School
+ggplot(master_table, aes(x=school_name, y=actual_reading_growth)) +
+  geom_boxplot()
+```
+```{r}
+#Math Growth by School
+ggplot(master_table, aes(x=school_name, y=actual_math_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Total Growth by School
+ggplot(master_table, aes(x=school_name, y=total_actual_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Student Count by School
+ggplot(master_table, aes(x=school_name, fill=goals_met)) +
+  geom_histogram(position = "identity", stat="count") + scale_fill_manual(values=c("green", "yellow", "red", "blue"))
+```
+
+```{r}
+#Grade Level by School
+ggplot(master_table, aes(x=grade_level_2019)) +
+  geom_histogram(position = "identity", stat="count") + facet_wrap(~school_name)
+```
+
+Here, I made a special exception to my practice of de-prioritizing aesthetics in exploratory analysis. I wanted to take a recently-discovered color palette for a spin!
+
+```{r}
+special_programs_only <- master_table %>%
+  filter(program_name!="None")
+
+ggplot(special_programs_only, aes(x=school_name, fill=program_name)) +
+  geom_histogram(position = "identity", stat="count") + paletteer::scale_fill_paletteer_d("rtist::vangogh")
+```
+
+##Grade EDA
+Next, I focus in on the different grade levels. I create charts to represent the number of students in each grade, which schools they attend, and which programs they partcipate in. I also create charts to visualize each grade's students' growth from Fall to Spring and their performance against other students nationally: 
+
+```{r}
+#Grade Level Distribution
+ggplot(master_table, aes(x=grade_level_2019)) +
+  geom_histogram(position = "identity", stat="count")
+```
+
+```{r}
+#Reading Growth by Grade Level
+ggplot(master_table, aes(x=factor(grade_level_2019), y=actual_reading_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Math Scores by Grade Level
+ggplot(master_table, aes(x=factor(grade_level_2019), y=actual_math_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Total Growth by Grade
+ggplot(master_table, aes(x=factor(grade_level_2019), y=total_actual_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Program Participation by Grade Level
+ggplot(special_programs_only, aes(x=grade_level_2019, fill=program_name)) +
+  geom_histogram(position = "identity", stat="count") + paletteer::scale_fill_paletteer_d("rtist::vangogh")
+```
+
+##Special Program EDA
+
+Then, I focus in on the different special programs. I create charts to represent the number of students in each program, which schools they attend, and which grades they are in. I also create charts to visualize each program's students' growth from Fall to Spring and their performance against other students nationally: 
+
+```{r}
+#Special Programs Distribution
+special_programs_only <- master_table %>%
+  filter(program_name!="None")
+
+ggplot(special_programs_only, aes(x=program_name)) +
+  geom_histogram(position = "identity", stat="count")
+```
+
+```{r}
+#Special Programs Distribution by School
+ggplot(master_table, aes(x=program_name)) +
+  geom_histogram(position = "identity", stat="count") + facet_wrap(~school_name)
+```
+
+```{r}
+#Percentile by Special Program
+ggplot(master_table, aes(x=program_name, y=average_percentile)) +
+  geom_boxplot()
+```
+
+```{r}
+#Actual Math Growth by Special Program
+ggplot(master_table, aes(x=program_name, y=actual_math_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Actual Reading Growth by Special Program
+ggplot(master_table, aes(x=program_name, y=actual_reading_growth)) +
+  geom_boxplot()
+```
+
+```{r}
+#Total Growth by Program
+ggplot(master_table, aes(x=program_name, y=total_actual_growth)) +
+  geom_boxplot()
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 12}
+#General View - Special Programs  
+ggplot(special_programs_only, aes(x = grade_level_2019, fill = goals_met)) +
+    geom_histogram(position = "identity", alpha = 0.9) +
+    facet_grid(school_name ~ .) + scale_fill_manual(values=c("green", "yellow", "red", "blue"))
+```
+
+Some special programs may be designed for students who will need extra support to achieve their full potential. I create separate visualizations for the gifted program and for the programs that do not perform as well as students who take only general education classes.
+
+```{r fig.align="center", echo = FALSE,fig.width = 12}  
+#General View - Gifted Students
+gifted_program_only <- master_table %>%
+  filter(program_name == "Gifted")
+  
+  ggplot(gifted_program_only, aes(x = grade_level_2019, fill = goals_met)) +
+    geom_histogram(position = "identity", alpha = 0.9) +
+    facet_grid(school_name ~ .) + scale_fill_manual(values=c("green", "yellow", "red", "blue"))
+```  
+
+```{r fig.align="center", echo = FALSE,fig.width = 12}  
+#General View - Below Average Programs
+below_average_programs_only <- master_table %>%
+  filter(program_name == "SPED"|program_name == "Tier 2"|program_name == "504"|program_name == "LEP")
+  
+  ggplot(below_average_programs_only, aes(x = grade_level_2019, fill = goals_met)) +
+    geom_histogram(position = "identity", alpha = 0.9) +
+    facet_grid(school_name ~ .) + scale_fill_manual(values=c("green", "yellow", "red", "blue"))
+```
+##Other Correlations
+
+I also create several scatterplots to help me get a sense of the connections between performance on different subjects and between semesters. I isolate some particular groups of students in different programs to better understand their academic situation.
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Fall Reading/Math Scores
+ggplot(master_table, aes(x = fall_reading_rit_score, y = fall_math_rit_score, color=program_name)) +
+  geom_point()
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Spring Reading/Math Scores
+ggplot(master_table, aes(x = spring_reading_rit_score, y = spring_math_rit_score, color=program_name)) +
+  geom_point()
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Fall Total/Spring Scores
+ggplot(master_table, aes(x = total_fall_score, y = total_spring_score, color=program_name)) +
+  geom_point() 
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Special Programs - Fall Reading/Math Scores
+ggplot(special_programs_only, aes(x = fall_reading_rit_score, y = fall_math_rit_score)) +
+  geom_point()
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Special Programs - Spring Reading/Math Scores
+ggplot(special_programs_only, aes(x = spring_reading_rit_score, y = spring_math_rit_score)) +
+  geom_point() 
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Special Programs - Fall Total/Spring Total Scores
+ggplot(special_programs_only, aes(x = total_fall_score, y = total_spring_score)) +
+  geom_point() 
+```
+
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Gifted - Fall Reading/Math Scores
+ggplot(gifted_program_only, aes(x = fall_reading_rit_score, y = fall_math_rit_score)) +
+  geom_point() 
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Gifted - Spring Reading/Math Scores
+ggplot(gifted_program_only, aes(x = spring_reading_rit_score, y = spring_math_rit_score)) +
+  geom_point() 
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Gifted - Fall Total/Spring Total Scores
+ggplot(gifted_program_only, aes(x = total_fall_score, y = total_spring_score)) +
+  geom_point() 
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Below Average Programs - Fall Reading/Math Scores
+ggplot(below_average_programs_only, aes(x = fall_reading_rit_score, y = fall_math_rit_score)) +
+  geom_point() 
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Below Average Programs - Spring Reading/Math Scores
+ggplot(below_average_programs_only, aes(x = spring_reading_rit_score, y = spring_math_rit_score)) +
+  geom_point() 
+```
+
+
+```{r fig.align="center", echo = FALSE,fig.width = 10}
+#Below Average Programs - Fall Total/Spring Total Scores
+ggplot(below_average_programs_only, aes(x = total_fall_score, y = total_spring_score)) +
+  geom_point() 
+```
+
+#Save to local device
+
+At this point, I bring the data onto my PC and begin creating more user-friendly visualizations in Tableau. 
+
+However, I utilize some significance testing and deploy some machine learning tools to gain a more mathematical understanding of the data. 
+
+```{r}
+write.csv(master_table, "C:\\Users\\lomba\\Downloads\\master_table.csv", row.names=FALSE)
+```
+
+#ANOVA and T-Test Analysis
+
+I use ANOVA and T-Test methods to asses the significance of any eventual findings.
+
+```{r}
+aov1 <- aov(total_actual_growth ~ school_name + grade_level_2019 + program_name, data = master_table)
+summary(aov1)
+```
+
+```{r}
+#T-Test - School
+pairwise.t.test(master_table$total_actual_growth, master_table$school_name, p.adjust ="none")
+```
+
+```{r}
+#T-Test - Program
+pairwise.t.test(master_table$total_actual_growth, master_table$program_name, p.adjust ="none")
+```
+
+```{r}
+#T-Test - Grade Level
+pairwise.t.test(master_table$total_actual_growth, master_table$grade_level_2019, p.adjust ="none")
+```
+
+#Insights from Machine Learning 
+
+I'll also deploy a simple machine learning model to see if the algorithm detect any otherwise unseen connections between data points. 
+
+##Logistic Regression
+
+First, I create a logistic regression model. Because the "features" (columns) of primary concern are all highly correlated (e.g., certain grades only attend certain schools), the model isn't the most effective tool available. But they are simple to create, and still might provide a clue as to hidden connections:
+
+```{r}
+colnames(master_table)
+```
+
+We encode the categorical variables (grade level, school, program participation) so they can be processed by the algorithm:
+
+```{r}
+master_table$grade_level_2019 <- as.factor(master_table$grade_level_2019)
+
+df <- select(master_table, average_percentile, goals_met, grade_level_2019, school_name, program_name)
+
+df <- mutate(df, target = ifelse(goals_met != "Both", 0, 1))
+df <- select(df, -goals_met)
+```
+
+```{r}
+ohdf <- select(df, c('school_name', 'program_name', 'grade_level_2019', 'target'))
+dummy <- dummyVars(" ~ .", data=ohdf)
+ohdf <- data.frame(predict(dummy, newdata=ohdf))
+```
+
+We scale our one numeric feature to avoid confusing the algorithm about its importance:
+
+```{r}
+ssdf <- select(df, c('average_percentile'))
+ssdf <- scale(ssdf)
+ssdf <- as.data.frame(ssdf)
+```
+
+```{r}
+df <- cbind(ohdf, ssdf)
+```
+
+```{r}
+colnames(df)
+```
+
+I split up the data into a training and testing set so we have a convenient way to verify how useful the algorithm is:
+
+```{r}
+
+split <- sample.split(df, SplitRatio = 0.8)
+
+```
+
+```{r}   
+sample <- sample(c(TRUE, FALSE), nrow(df), replace=TRUE, prob=c(0.7,0.3))
+train_reg  <- df[sample, ]
+test_reg   <- df[!sample, ]
+train_reg <- as.data.frame(train_reg)
+test_reg <- as.data.frame(test_reg)
+
+print("Count of total missing values - ")
+print(sum(is.na(train_reg)))
+print(colSums(is.na(train_reg)))
+
+print("Count of total missing values - ")
+print(sum(is.na(test_reg)))
+print(colSums(is.na(test_reg)))
+```
+
+I train the model on the training data:
+
+```{r}     
+logistic_model <- glm(target ~ school_nameSchool.A + school_nameSchool.B + school_nameSchool.C + school_nameSchool.D + school_nameSchool.E + school_nameSchool.F + school_nameSchool.G+program_name504 + program_nameGifted + program_nameLEP + program_nameNone + program_nameSPED + program_nameTier.2 + grade_level_2019.0 + grade_level_2019.1 + grade_level_2019.2 +grade_level_2019.3 + grade_level_2019.4 + grade_level_2019.5 + grade_level_2019.6 + grade_level_2019.7 + grade_level_2019.8 + average_percentile, 
+                      data = train_reg, 
+                      family = "binomial")
+
+logistic_model
+```
+
+I examine the results more fully:
+
+```{r}    
+# Summary
+summary(logistic_model)
+   
+predict_reg <- predict(logistic_model, 
+                       test_reg, type = "response")
+   
+predict_reg <- ifelse(predict_reg >0.5, 1, 0)
+
+table(test_reg$target, predict_reg)
+   
+missing_classerr <- mean(predict_reg != test_reg$target)
+print(paste('Accuracy =', 1 - missing_classerr))
+   
+``` 
+
+##Isolating Feature Impact of Logistic Regression Model
+
+```{r}
+coef(logistic_model)
+```
+
+The smaller the coefficient, the smaller that feature's impact on a student's performance. There are some interesting potential takeaways, such as the negative impact of being in the gifted program. But these coefficients have to be viewed with a large grain of salt, as logistic regression does not handle these kinds of features very well.
+
+#Conclusion
+
+Thank you for reviewing my submission!
